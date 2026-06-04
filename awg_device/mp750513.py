@@ -1,572 +1,240 @@
-"""
-MP750513 two-channel Arbitrary Waveform Generator driver.
-Protocol: SCPI over TCP socket (port 5025).
-
-Each channel is addressed with the standard SCPI SOURce<n> / OUTPut<n>
-prefix.  The driver exposes every parameter both via per-channel methods
-(set_frequency(freq, channel=1)) and via a thin ChannelProxy object so
-callers can write:
-
-    awg.ch1.set_frequency(1000)
-    awg.ch2.set_square()
-"""
-
 import socket
 import time
-import threading
-from typing import Literal
-
-VALID_CHANNELS = (1, 2)
-VALID_WAVEFORMS = ("SIN", "SQU", "TRI", "RAMP")
-
-
-class AWGError(Exception):
-    """Raised when the instrument returns an error or is unreachable."""
-
-
-class ChannelProxy:
-    """
-    Thin proxy that binds a fixed channel number to the parent driver.
-
-    Usage::
-
-        awg = MP750513("192.168.1.97")
-        awg.ch1.set_sine()
-        awg.ch1.set_frequency(1000)
-        awg.ch1.output_on()
-    """
-
-    def __init__(self, driver: "MP750513", channel: int) -> None:
-        self._driver = driver
-        self._channel = channel
-
-    # --- output -----------------------------------------------------------
-    def output_on(self) -> None:
-        self._driver.output_on(self._channel)
-
-    def output_off(self) -> None:
-        self._driver.output_off(self._channel)
-
-    def enable(self) -> None:
-        self._driver.output_on(self._channel)
-
-    def disable(self) -> None:
-        self._driver.output_off(self._channel)
-
-    def get_output_state(self) -> bool:
-        return self._driver.get_output_state(self._channel)
-
-    # --- frequency --------------------------------------------------------
-    def set_frequency(self, freq: float) -> None:
-        self._driver.set_frequency(freq, self._channel)
-
-    def get_frequency(self) -> float:
-        return self._driver.get_frequency(self._channel)
-
-    # --- amplitude --------------------------------------------------------
-    def set_amplitude(self, amp: float) -> None:
-        self._driver.set_amplitude(amp, self._channel)
-
-    def get_amplitude(self) -> float:
-        return self._driver.get_amplitude(self._channel)
-
-    def set_voltage(self, volt: float) -> None:
-        self._driver.set_amplitude(volt, self._channel)
-
-    def get_voltage(self) -> float:
-        return self._driver.get_amplitude(self._channel)
-
-    # --- DC offset --------------------------------------------------------
-    def set_dc_offset(self, offset: float) -> None:
-        self._driver.set_dc_offset(offset, self._channel)
-
-    def get_dc_offset(self) -> float:
-        return self._driver.get_dc_offset(self._channel)
-
-    def set_offset(self, offset: float) -> None:
-        self._driver.set_dc_offset(offset, self._channel)
-
-    def get_offset(self) -> float:
-        return self._driver.get_dc_offset(self._channel)
-
-    # --- waveform ---------------------------------------------------------
-    def set_waveform(self, waveform: str) -> None:
-        self._driver.set_waveform(waveform, self._channel)
-
-    def get_waveform(self) -> str:
-        return self._driver.get_waveform(self._channel)
-
-    def set_sine(self) -> None:
-        self._driver.set_sine(self._channel)
-
-    def set_square(self) -> None:
-        self._driver.set_square(self._channel)
-
-    def set_triangle(self) -> None:
-        self._driver.set_triangle(self._channel)
-
-    def set_ramp(self) -> None:
-        self._driver.set_ramp(self._channel)
-
-    # --- phase ------------------------------------------------------------
-    def set_phase(self, phase: float) -> None:
-        self._driver.set_phase(phase, self._channel)
-
-    def get_phase(self) -> float:
-        return self._driver.get_phase(self._channel)
-
-    # --- duty cycle -------------------------------------------------------
-    def set_duty_cycle(self, duty: float) -> None:
-        self._driver.set_duty_cycle(duty, self._channel)
-
-    def get_duty_cycle(self) -> float:
-        return self._driver.get_duty_cycle(self._channel)
-
-    # --- burst ------------------------------------------------------------
-    def enable_burst(self) -> None:
-        self._driver.enable_burst(self._channel)
-
-    def disable_burst(self) -> None:
-        self._driver.disable_burst(self._channel)
-
-    def set_burst_mode(self, mode: str) -> None:
-        self._driver.set_burst_mode(mode, self._channel)
-
-    def get_burst_mode(self) -> str:
-        return self._driver.get_burst_mode(self._channel)
-
-    def set_burst_cycles(self, cycles: int) -> None:
-        self._driver.set_burst_cycles(cycles, self._channel)
-
-    def get_burst_cycles(self) -> int:
-        return self._driver.get_burst_cycles(self._channel)
-
-    def trigger_burst(self) -> None:
-        self._driver.trigger_burst(self._channel)
-
-    def trigger(self) -> None:
-        self._driver.trigger_burst(self._channel)
-
-    def __repr__(self) -> str:
-        return f"<ChannelProxy ch{self._channel} of {self._driver!r}>"
 
 
 class MP750513:
     """
-    Driver for the Multicomp Pro MP750513 two-channel AWG.
+    Simple SCPI driver for Multicomp-Pro MP750513 Arbitrary Waveform Generator.
+    Designed to be stable, blocking, and safe (no polling loops inside).
 
-    Parameters
-    ----------
-    ip : str
-        Instrument IP address.
-    port : int
-        TCP port (default 5025).
-    timeout : float
-        Socket timeout in seconds (default 2).
-
-    Channel addressing
-    ------------------
-    All methods that operate on a single channel accept an optional
-    ``channel`` keyword argument (1 or 2, default 1).
-
-    Alternatively use the ``ch1`` / ``ch2`` proxy attributes::
-
-        awg = MP750513("192.168.1.97")
-        awg.ch1.set_sine()
-        awg.ch2.set_square()
-        awg.ch1.output_on()
-        awg.ch2.output_on()
+    Supports both channels. Pass channel=1 or channel=2 to each method,
+    or set a default channel on the instance via set_channel().
     """
 
-    def __init__(self, ip: str, port: int = 5025, timeout: float = 2) -> None:
-        self._ip = ip
-        self._port = port
-        self._timeout = timeout
-        self._sock: socket.socket | None = None
-        self._lock = threading.Lock()
+    def __init__(self, ip, port=5025, timeout=2, channel=1):
+        self.ip = ip
+        self.port = port
+        self.timeout = timeout
+        self.channel = channel  # default channel
 
-        # Convenient per-channel proxy attributes
-        self.ch1 = ChannelProxy(self, 1)
-        self.ch2 = ChannelProxy(self, 2)
+        self._connect()
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers                                                     #
-    # ------------------------------------------------------------------ #
+    # -----------------------------
+    # CHANNEL SELECTION
+    # -----------------------------
+    def set_channel(self, channel: int):
+        """Set the default channel (1 or 2) for subsequent commands."""
+        if channel not in (1, 2):
+            raise ValueError("Channel must be 1 or 2")
+        self.channel = channel
 
-    def _connect(self) -> None:
-        """Open TCP socket if not already open."""
-        if self._sock is not None:
-            return
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(self._timeout)
+    def get_channel(self):
+        """Return the current default channel."""
+        return self.channel
+
+    def _ch(self, channel=None) -> int:
+        """Resolve channel: use argument if given, else fall back to self.channel."""
+        ch = channel if channel is not None else self.channel
+        if ch not in (1, 2):
+            raise ValueError(f"Invalid channel: {ch}. Must be 1 or 2.")
+        return ch
+
+    def _src(self, channel=None) -> str:
+        """Return the SOURCE prefix for a given channel, e.g. 'SOURCE1'."""
+        return f"SOURCE{self._ch(channel)}"
+
+    # -----------------------------
+    # CONNECTION
+    # -----------------------------
+    def _connect(self):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect((self.ip, self.port))
+        time.sleep(0.2)
+
+    def _reconnect(self):
         try:
-            sock.connect((self._ip, self._port))
-        except OSError as exc:
-            sock.close()
-            raise AWGError(f"Cannot connect to {self._ip}:{self._port}: {exc}") from exc
-        self._sock = sock
+            self.sock.close()
+        except Exception:
+            pass
+        time.sleep(0.5)
+        self._connect()
 
-    def _disconnect(self) -> None:
-        if self._sock is not None:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
-
-    def _send(self, cmd: str) -> None:
-        """Send a command string (no response expected)."""
-        with self._lock:
-            self._connect()
-            try:
-                self._sock.sendall((cmd + "\n").encode())
-            except OSError:
-                self._disconnect()
-                self._connect()
-                self._sock.sendall((cmd + "\n").encode())
-
-    def _query(self, cmd: str) -> str:
-        """Send a query and return the stripped response."""
-        with self._lock:
-            self._connect()
-            try:
-                self._sock.sendall((cmd + "\n").encode())
-                return self._recv()
-            except OSError:
-                self._disconnect()
-                self._connect()
-                self._sock.sendall((cmd + "\n").encode())
-                return self._recv()
-
-    def _recv(self) -> str:
-        buf = b""
-        while True:
-            chunk = self._sock.recv(4096)
-            if not chunk:
-                break
-            buf += chunk
-            if buf.endswith(b"\n"):
-                break
-        return buf.decode().strip()
-
-    @staticmethod
-    def _validate_channel(channel: int) -> int:
-        if channel not in VALID_CHANNELS:
-            raise ValueError(f"channel must be 1 or 2, got {channel!r}")
-        return channel
-
-    @staticmethod
-    def _src(channel: int) -> str:
-        """Return the SOURce prefix for a channel, e.g. 'SOURce1'."""
-        return f"SOURce{channel}"
-
-    @staticmethod
-    def _out(channel: int) -> str:
-        """Return the OUTPut prefix for a channel, e.g. 'OUTPut1'."""
-        return f"OUTPut{channel}"
-
-    # ------------------------------------------------------------------ #
-    # Device info                                                          #
-    # ------------------------------------------------------------------ #
-
-    def get_id(self) -> str:
-        """Query the instrument identification string (*IDN?)."""
-        return self._query("*IDN?")
-
-    def is_connected(self) -> bool:
-        """Return True if the instrument responds to *IDN?."""
+    # -----------------------------
+    # LOW LEVEL IO
+    # -----------------------------
+    def write(self, cmd):
         try:
-            self.get_id()
+            self.sock.sendall((cmd + "\n").encode())
+            time.sleep(0.1)
+        except Exception:
+            self._reconnect()
+            self.sock.sendall((cmd + "\n").encode())
+            time.sleep(0.1)
+
+    def query(self, cmd):
+        try:
+            self.sock.sendall((cmd + "\n").encode())
+            time.sleep(0.25)
+            return self.sock.recv(1024).decode().strip()
+        except Exception:
+            self._reconnect()
+            self.sock.sendall((cmd + "\n").encode())
+            time.sleep(0.25)
+            return self.sock.recv(1024).decode().strip()
+
+    # Connection verification
+    def is_connected(self):
+        try:
+            self.query("*IDN?")
             return True
-        except AWGError:
+        except Exception:
             return False
 
-    # ------------------------------------------------------------------ #
-    # Output control                                                       #
-    # ------------------------------------------------------------------ #
+    # Get device ID
+    def get_id(self):
+        return self.query("*IDN?")
 
-    def output_on(self, channel: int = 1) -> None:
-        """Enable the output of *channel*."""
-        ch = self._validate_channel(channel)
-        self._send(f"{self._out(ch)} ON")
+    # -----------------------------
+    # OUTPUT CONTROL
+    # Output commands use OUTPUT{N}, which is separate from SOURCE{N}
+    # -----------------------------
+    def output_on(self, channel=None):
+        self.write(f"OUTPUT{self._ch(channel)} 1")
 
-    def output_off(self, channel: int = 1) -> None:
-        """Disable the output of *channel*."""
-        ch = self._validate_channel(channel)
-        self._send(f"{self._out(ch)} OFF")
+    def output_off(self, channel=None):
+        self.write(f"OUTPUT{self._ch(channel)} 0")
 
-    def enable(self, channel: int = 1) -> None:
-        """Alias for :meth:`output_on`."""
+    def get_output_state(self, channel=None):
+        return self.query(f"OUTPUT{self._ch(channel)}?")
+
+    # Aliases for consistency
+    def enable(self, channel=None):
         self.output_on(channel)
 
-    def disable(self, channel: int = 1) -> None:
-        """Alias for :meth:`output_off`."""
+    def disable(self, channel=None):
         self.output_off(channel)
 
-    def get_output_state(self, channel: int = 1) -> bool:
-        """Return True if the output of *channel* is enabled."""
-        ch = self._validate_channel(channel)
-        resp = self._query(f"{self._out(ch)}?")
-        return resp.strip().upper() in ("1", "ON")
+    # -----------------------------
+    # FREQUENCY
+    # -----------------------------
+    def set_frequency(self, freq: float, channel=None):
+        """Set frequency in Hz."""
+        self.write(f"{self._src(channel)}:FREQ {freq}")
 
-    def all_outputs_on(self) -> None:
-        """Enable both channel outputs simultaneously."""
-        for ch in VALID_CHANNELS:
-            self.output_on(ch)
+    def get_frequency(self, channel=None):
+        """Get current frequency in Hz."""
+        return self.query(f"{self._src(channel)}:FREQ?")
 
-    def all_outputs_off(self) -> None:
-        """Disable both channel outputs simultaneously."""
-        for ch in VALID_CHANNELS:
-            self.output_off(ch)
+    # -----------------------------
+    # AMPLITUDE
+    # -----------------------------
+    def set_amplitude(self, amplitude: float, channel=None):
+        """Set amplitude in Volts."""
+        self.write(f"{self._src(channel)}:VOLT {amplitude}")
 
-    # ------------------------------------------------------------------ #
-    # Frequency                                                            #
-    # ------------------------------------------------------------------ #
+    def get_amplitude(self, channel=None):
+        """Get current amplitude in Volts."""
+        return self.query(f"{self._src(channel)}:VOLT?")
 
-    def set_frequency(self, freq: float, channel: int = 1) -> None:
-        """Set the output frequency of *channel* in Hz."""
-        ch = self._validate_channel(channel)
-        self._send(f"{self._src(ch)}:FREQuency {freq:.6f}")
+    # Alias for VOLT
+    def set_voltage(self, voltage: float, channel=None):
+        self.set_amplitude(voltage, channel)
 
-    def get_frequency(self, channel: int = 1) -> float:
-        """Return the output frequency of *channel* in Hz."""
-        ch = self._validate_channel(channel)
-        return float(self._query(f"{self._src(ch)}:FREQuency?"))
-
-    # ------------------------------------------------------------------ #
-    # Amplitude                                                            #
-    # ------------------------------------------------------------------ #
-
-    def set_amplitude(self, amp: float, channel: int = 1) -> None:
-        """Set the output amplitude of *channel* in Volts (peak-to-peak)."""
-        ch = self._validate_channel(channel)
-        self._send(f"{self._src(ch)}:VOLTage {amp:.6f}")
-
-    def get_amplitude(self, channel: int = 1) -> float:
-        """Return the output amplitude of *channel* in Volts."""
-        ch = self._validate_channel(channel)
-        return float(self._query(f"{self._src(ch)}:VOLTage?"))
-
-    def set_voltage(self, volt: float, channel: int = 1) -> None:
-        """Alias for :meth:`set_amplitude`."""
-        self.set_amplitude(volt, channel)
-
-    def get_voltage(self, channel: int = 1) -> float:
-        """Alias for :meth:`get_amplitude`."""
+    def get_voltage(self, channel=None):
         return self.get_amplitude(channel)
 
-    # ------------------------------------------------------------------ #
-    # DC offset                                                            #
-    # ------------------------------------------------------------------ #
+    # -----------------------------
+    # DC OFFSET
+    # -----------------------------
+    def set_dc_offset(self, offset: float, channel=None):
+        """Set DC offset in Volts."""
+        self.write(f"{self._src(channel)}:VOLT:OFFS {offset}")
 
-    def set_dc_offset(self, offset: float, channel: int = 1) -> None:
-        """Set the DC offset of *channel* in Volts."""
-        ch = self._validate_channel(channel)
-        self._send(f"{self._src(ch)}:VOLTage:OFFSet {offset:.6f}")
+    def get_dc_offset(self, channel=None):
+        """Get current DC offset in Volts."""
+        return self.query(f"{self._src(channel)}:VOLT:OFFS?")
 
-    def get_dc_offset(self, channel: int = 1) -> float:
-        """Return the DC offset of *channel* in Volts."""
-        ch = self._validate_channel(channel)
-        return float(self._query(f"{self._src(ch)}:VOLTage:OFFSet?"))
-
-    def set_offset(self, offset: float, channel: int = 1) -> None:
-        """Alias for :meth:`set_dc_offset`."""
+    # Alias
+    def set_offset(self, offset: float, channel=None):
         self.set_dc_offset(offset, channel)
 
-    def get_offset(self, channel: int = 1) -> float:
-        """Alias for :meth:`get_dc_offset`."""
+    def get_offset(self, channel=None):
         return self.get_dc_offset(channel)
 
-    # ------------------------------------------------------------------ #
-    # Waveform type                                                        #
-    # ------------------------------------------------------------------ #
+    # -----------------------------
+    # WAVEFORM TYPE
+    # -----------------------------
+    def set_waveform(self, waveform: str, channel=None):
+        """Set waveform type: SIN, SQU, TRI, RAMP, etc."""
+        self.write(f"{self._src(channel)}:FUNC {waveform}")
 
-    def set_waveform(self, waveform: str, channel: int = 1) -> None:
-        """
-        Set the waveform type of *channel*.
+    def get_waveform(self, channel=None):
+        """Get current waveform type."""
+        return self.query(f"{self._src(channel)}:FUNC?")
 
-        Parameters
-        ----------
-        waveform : str
-            One of ``SIN``, ``SQU``, ``TRI``, ``RAMP``.
-        channel : int
-            1 or 2 (default 1).
-        """
-        ch = self._validate_channel(channel)
-        wf = waveform.upper()
-        if wf not in VALID_WAVEFORMS:
-            raise ValueError(
-                f"waveform must be one of {VALID_WAVEFORMS}, got {waveform!r}"
-            )
-        self._send(f"{self._src(ch)}:FUNCtion {wf}")
-
-    def get_waveform(self, channel: int = 1) -> str:
-        """Return the active waveform type of *channel*."""
-        ch = self._validate_channel(channel)
-        return self._query(f"{self._src(ch)}:FUNCtion?")
-
-    def set_sine(self, channel: int = 1) -> None:
-        """Set *channel* to sine wave."""
+    # Convenience methods for common waveforms
+    def set_sine(self, channel=None):
         self.set_waveform("SIN", channel)
 
-    def set_square(self, channel: int = 1) -> None:
-        """Set *channel* to square wave."""
+    def set_square(self, channel=None):
         self.set_waveform("SQU", channel)
 
-    def set_triangle(self, channel: int = 1) -> None:
-        """Set *channel* to triangle wave."""
+    def set_triangle(self, channel=None):
         self.set_waveform("TRI", channel)
 
-    def set_ramp(self, channel: int = 1) -> None:
-        """Set *channel* to ramp wave."""
+    def set_ramp(self, channel=None):
         self.set_waveform("RAMP", channel)
 
-    # ------------------------------------------------------------------ #
-    # Phase                                                                #
-    # ------------------------------------------------------------------ #
+    # -----------------------------
+    # PHASE
+    # -----------------------------
+    def set_phase(self, phase: float, channel=None):
+        """Set phase in degrees."""
+        self.write(f"{self._src(channel)}:PHAS {phase}")
 
-    def set_phase(self, phase: float, channel: int = 1) -> None:
-        """Set the phase of *channel* in degrees."""
-        ch = self._validate_channel(channel)
-        self._send(f"{self._src(ch)}:PHASe {phase:.4f}")
+    def get_phase(self, channel=None):
+        """Get current phase in degrees."""
+        return self.query(f"{self._src(channel)}:PHAS?")
 
-    def get_phase(self, channel: int = 1) -> float:
-        """Return the phase of *channel* in degrees."""
-        ch = self._validate_channel(channel)
-        return float(self._query(f"{self._src(ch)}:PHASe?"))
+    # -----------------------------
+    # DUTY CYCLE (for square waves)
+    # -----------------------------
+    def set_duty_cycle(self, duty: float, channel=None):
+        """Set duty cycle as percentage (0-100)."""
+        self.write(f"{self._src(channel)}:FUNC:SQU:DCYC {duty}")
 
-    # ------------------------------------------------------------------ #
-    # Duty cycle                                                           #
-    # ------------------------------------------------------------------ #
+    def get_duty_cycle(self, channel=None):
+        """Get current duty cycle percentage."""
+        return self.query(f"{self._src(channel)}:FUNC:SQU:DCYC?")
 
-    def set_duty_cycle(self, duty: float, channel: int = 1) -> None:
-        """
-        Set the duty cycle of *channel* (square wave) as a percentage 0–100.
-        """
-        ch = self._validate_channel(channel)
-        self._send(f"{self._src(ch)}:FUNCtion:SQUare:DCYCle {duty:.2f}")
+    # -----------------------------
+    # BURST MODE
+    # -----------------------------
+    def set_burst_mode(self, mode: str, channel=None):
+        """Set burst mode: TRIGgered or MANUAL."""
+        self.write(f"{self._src(channel)}:BURS:MODE {mode}")
 
-    def get_duty_cycle(self, channel: int = 1) -> float:
-        """Return the duty cycle of *channel* as a percentage."""
-        ch = self._validate_channel(channel)
-        return float(self._query(f"{self._src(ch)}:FUNCtion:SQUare:DCYCle?"))
+    def get_burst_mode(self, channel=None):
+        return self.query(f"{self._src(channel)}:BURS:MODE?")
 
-    # ------------------------------------------------------------------ #
-    # Burst mode                                                           #
-    # ------------------------------------------------------------------ #
+    def enable_burst(self, channel=None):
+        self.write(f"{self._src(channel)}:BURS ON")
 
-    def enable_burst(self, channel: int = 1) -> None:
-        """Enable burst mode on *channel*."""
-        ch = self._validate_channel(channel)
-        self._send(f"{self._src(ch)}:BURSt:STATe ON")
+    def disable_burst(self, channel=None):
+        self.write(f"{self._src(channel)}:BURS OFF")
 
-    def disable_burst(self, channel: int = 1) -> None:
-        """Disable burst mode on *channel*."""
-        ch = self._validate_channel(channel)
-        self._send(f"{self._src(ch)}:BURSt:STATe OFF")
+    def set_burst_cycles(self, cycles: int, channel=None):
+        """Set number of cycles in burst."""
+        self.write(f"{self._src(channel)}:BURS:NCYC {cycles}")
 
-    def set_burst_mode(self, mode: str, channel: int = 1) -> None:
-        """
-        Set the burst trigger mode of *channel*.
+    def get_burst_cycles(self, channel=None):
+        return self.query(f"{self._src(channel)}:BURS:NCYC?")
 
-        Parameters
-        ----------
-        mode : str
-            ``TRIGgered`` or ``MANUAL``.
-        channel : int
-            1 or 2 (default 1).
-        """
-        ch = self._validate_channel(channel)
-        self._send(f"{self._src(ch)}:BURSt:MODE {mode}")
+    # Trigger burst (global command, no channel prefix needed)
+    def trigger_burst(self):
+        self.write("*TRG")
 
-    def get_burst_mode(self, channel: int = 1) -> str:
-        """Return the burst trigger mode of *channel*."""
-        ch = self._validate_channel(channel)
-        return self._query(f"{self._src(ch)}:BURSt:MODE?")
-
-    def set_burst_cycles(self, cycles: int, channel: int = 1) -> None:
-        """Set the number of cycles per burst on *channel*."""
-        ch = self._validate_channel(channel)
-        self._send(f"{self._src(ch)}:BURSt:NCYCles {int(cycles)}")
-
-    def get_burst_cycles(self, channel: int = 1) -> int:
-        """Return the burst cycle count of *channel*."""
-        ch = self._validate_channel(channel)
-        return int(float(self._query(f"{self._src(ch)}:BURSt:NCYCles?")))
-
-    def trigger_burst(self, channel: int = 1) -> None:
-        """Software-trigger a burst on *channel*."""
-        ch = self._validate_channel(channel)
-        self._send(f"{self._src(ch)}:BURSt:TRIGger")
-
-    def trigger(self, channel: int = 1) -> None:
-        """Alias for :meth:`trigger_burst`."""
-        self.trigger_burst(channel)
-
-    # ------------------------------------------------------------------ #
-    # Phase coupling / synchronisation helpers                             #
-    # ------------------------------------------------------------------ #
-
-    def align_phases(self) -> None:
-        """
-        Reset the phase accumulators of both channels simultaneously so
-        that CH1 and CH2 start from the same point in their cycle.
-        Useful when using the two channels as a quadrature or differential
-        pair.
-        """
-        self._send("PHASe:ALIGn")
-
-    # ------------------------------------------------------------------ #
-    # Snapshot / measure                                                   #
-    # ------------------------------------------------------------------ #
-
-    def get_channel_state(self, channel: int = 1) -> dict:
-        """
-        Return a dictionary of all current settings for *channel*.
-
-        Returns
-        -------
-        dict with keys: channel, waveform, frequency_hz, amplitude_v,
-        dc_offset_v, phase_deg, duty_cycle_pct, output_on,
-        burst_enabled, burst_mode, burst_cycles.
-        """
-        ch = self._validate_channel(channel)
-        wf = self.get_waveform(ch)
-        duty = self.get_duty_cycle(ch) if wf.upper() in ("SQU",) else None
-        return {
-            "channel": ch,
-            "waveform": wf,
-            "frequency_hz": self.get_frequency(ch),
-            "amplitude_v": self.get_amplitude(ch),
-            "dc_offset_v": self.get_dc_offset(ch),
-            "phase_deg": self.get_phase(ch),
-            "duty_cycle_pct": duty,
-            "output_on": self.get_output_state(ch),
-            "burst_mode": self.get_burst_mode(ch),
-            "burst_cycles": self.get_burst_cycles(ch),
-        }
-
-    def get_all_state(self) -> dict:
-        """Return a snapshot of settings for both channels."""
-        return {
-            "ch1": self.get_channel_state(1),
-            "ch2": self.get_channel_state(2),
-        }
-
-    # ------------------------------------------------------------------ #
-    # Context manager support                                              #
-    # ------------------------------------------------------------------ #
-
-    def close(self) -> None:
-        """Close the TCP connection."""
-        self._disconnect()
-
-    def __enter__(self) -> "MP750513":
-        self._connect()
-        return self
-
-    def __exit__(self, *_) -> None:
-        self.close()
-
-    def __repr__(self) -> str:
-        return f"MP750513(ip={self._ip!r}, port={self._port})"
+    # Alias
+    def trigger(self):
+        self.trigger_burst()
