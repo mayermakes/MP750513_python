@@ -26,20 +26,27 @@ from awg_device import MP750513
 # Connect to AWG
 awg = MP750513("192.168.1.97")
 
-# Set sine wave at 1 kHz
-awg.set_waveform("SIN")
-awg.set_frequency(1000)
-awg.set_amplitude(5.0)
+# Channel 1: 1 kHz sine wave with DC offset
+awg.set_waveform("SIN", channel=1)
+awg.set_frequency(1000, channel=1)
+awg.set_amplitude(3.3, channel=1)
+awg.set_dc_offset(2.5, channel=1)
+awg.output_on(channel=1)
 
-# Enable output
-awg.output_on()
+# Channel 2: 500 Hz square wave
+awg.set_waveform("SQU", channel=2)
+awg.set_frequency(500, channel=2)
+awg.set_amplitude(5.0, channel=2)
+awg.set_duty_cycle(50, channel=2)
+awg.output_on(channel=2)
 
 # Read back parameters
-print(awg.get_frequency())
-print(awg.get_amplitude())
+print(awg.get_frequency(channel=1))
+print(awg.get_frequency(channel=2))
 
-# Disable output
-awg.output_off()
+# Disable both outputs
+awg.output_off(channel=1)
+awg.output_off(channel=2)
 ```
 
 ## API Reference
@@ -47,22 +54,42 @@ awg.output_off()
 ### Initialization
 
 ```python
-awg = MP750513(ip, port=5025, timeout=2)
+awg = MP750513(ip, port=5025, timeout=2, channel=1)
 ```
 
 **Parameters:**
 - `ip` (str): Device IP address
 - `port` (int): TCP port (default: 5025)
 - `timeout` (float): Socket timeout in seconds
+- `channel` (int): Default channel, 1 or 2 (default: 1)
+
+### Channel Selection
+
+The MP750513 has two independent output channels. All methods accept an optional `channel` argument (1 or 2). If omitted, the instance default is used.
+
+```python
+# Set default channel at construction
+awg = MP750513("192.168.1.97", channel=1)
+
+# Override per call
+awg.set_frequency(1000, channel=1)
+awg.set_frequency(500,  channel=2)
+
+# Or change the instance default
+awg.set_channel(2)
+awg.set_frequency(500)    # now targets channel 2
+
+awg.get_channel()         # returns current default channel
+```
 
 ### Output Control
 
 ```python
-awg.output_on()           # Enable output
-awg.output_off()          # Disable output
-awg.get_output_state()    # Get output state
-awg.enable()              # Alias for output_on()
-awg.disable()             # Alias for output_off()
+awg.output_on(channel=1)           # Enable output on channel 1
+awg.output_off(channel=2)          # Disable output on channel 2
+awg.get_output_state(channel=1)    # Get output state for channel 1
+awg.enable(channel=1)              # Alias for output_on()
+awg.disable(channel=2)             # Alias for output_off()
 ```
 
 ### Frequency
@@ -238,5 +265,8 @@ curl -X POST http://192.168.1.97:3000/set/amplitude \
 - The driver is designed to be blocking and safe (no polling loops)
 - Connection issues trigger automatic reconnection
 - All socket operations include timeout handling
+- Both channels are fully independent — frequency, amplitude, waveform, offset, and phase can be set separately per channel
+- All channel-specific commands use the `SOURCE{N}:` SCPI prefix internally; short-form commands (e.g. `:FREQ`) do not support channel selection and are not used
 - DC offset is useful for biasing signals (e.g., for AC coupling)
 - Burst mode allows generation of a finite number of waveform cycles triggered by command or external signal
+- `get_duty_cycle()` readback may time out on some firmware versions; the set command works reliably

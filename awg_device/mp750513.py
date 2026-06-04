@@ -6,14 +6,42 @@ class MP750513:
     """
     Simple SCPI driver for Multicomp-Pro MP750513 Arbitrary Waveform Generator.
     Designed to be stable, blocking, and safe (no polling loops inside).
+
+    Supports both channels. Pass channel=1 or channel=2 to each method,
+    or set a default channel on the instance via set_channel().
     """
 
-    def __init__(self, ip, port=5025, timeout=2):
+    def __init__(self, ip, port=5025, timeout=2, channel=1):
         self.ip = ip
         self.port = port
         self.timeout = timeout
+        self.channel = channel  # default channel
 
         self._connect()
+
+    # -----------------------------
+    # CHANNEL SELECTION
+    # -----------------------------
+    def set_channel(self, channel: int):
+        """Set the default channel (1 or 2) for subsequent commands."""
+        if channel not in (1, 2):
+            raise ValueError("Channel must be 1 or 2")
+        self.channel = channel
+
+    def get_channel(self):
+        """Return the current default channel."""
+        return self.channel
+
+    def _ch(self, channel=None) -> int:
+        """Resolve channel: use argument if given, else fall back to self.channel."""
+        ch = channel if channel is not None else self.channel
+        if ch not in (1, 2):
+            raise ValueError(f"Invalid channel: {ch}. Must be 1 or 2.")
+        return ch
+
+    def _src(self, channel=None) -> str:
+        """Return the SOURCE prefix for a given channel, e.g. 'SOURCE1'."""
+        return f"SOURCE{self._ch(channel)}"
 
     # -----------------------------
     # CONNECTION
@@ -27,7 +55,7 @@ class MP750513:
     def _reconnect(self):
         try:
             self.sock.close()
-        except:
+        except Exception:
             pass
         time.sleep(0.5)
         self._connect()
@@ -39,7 +67,7 @@ class MP750513:
         try:
             self.sock.sendall((cmd + "\n").encode())
             time.sleep(0.1)
-        except:
+        except Exception:
             self._reconnect()
             self.sock.sendall((cmd + "\n").encode())
             time.sleep(0.1)
@@ -49,7 +77,7 @@ class MP750513:
             self.sock.sendall((cmd + "\n").encode())
             time.sleep(0.25)
             return self.sock.recv(1024).decode().strip()
-        except:
+        except Exception:
             self._reconnect()
             self.sock.sendall((cmd + "\n").encode())
             time.sleep(0.25)
@@ -60,7 +88,7 @@ class MP750513:
         try:
             self.query("*IDN?")
             return True
-        except:
+        except Exception:
             return False
 
     # Get device ID
@@ -69,140 +97,141 @@ class MP750513:
 
     # -----------------------------
     # OUTPUT CONTROL
+    # Output commands use OUTPUT{N}, which is separate from SOURCE{N}
     # -----------------------------
-    def output_on(self):
-        self.write("OUTP 1")
+    def output_on(self, channel=None):
+        self.write(f"OUTPUT{self._ch(channel)} 1")
 
-    def output_off(self):
-        self.write("OUTP 0")
+    def output_off(self, channel=None):
+        self.write(f"OUTPUT{self._ch(channel)} 0")
 
-    def get_output_state(self):
-        return self.query("OUTP?")
+    def get_output_state(self, channel=None):
+        return self.query(f"OUTPUT{self._ch(channel)}?")
 
     # Aliases for consistency
-    def enable(self):
-        self.output_on()
+    def enable(self, channel=None):
+        self.output_on(channel)
 
-    def disable(self):
-        self.output_off()
+    def disable(self, channel=None):
+        self.output_off(channel)
 
     # -----------------------------
     # FREQUENCY
     # -----------------------------
-    def set_frequency(self, freq: float):
-        """Set frequency in Hz"""
-        self.write(f":FREQ {freq}")
+    def set_frequency(self, freq: float, channel=None):
+        """Set frequency in Hz."""
+        self.write(f"{self._src(channel)}:FREQ {freq}")
 
-    def get_frequency(self):
-        """Get current frequency in Hz"""
-        return self.query(":FREQ?")
+    def get_frequency(self, channel=None):
+        """Get current frequency in Hz."""
+        return self.query(f"{self._src(channel)}:FREQ?")
 
     # -----------------------------
     # AMPLITUDE
     # -----------------------------
-    def set_amplitude(self, amplitude: float):
-        """Set amplitude in Volts"""
-        self.write(f":VOLT {amplitude}")
+    def set_amplitude(self, amplitude: float, channel=None):
+        """Set amplitude in Volts."""
+        self.write(f"{self._src(channel)}:VOLT {amplitude}")
 
-    def get_amplitude(self):
-        """Get current amplitude in Volts"""
-        return self.query(":VOLT?")
+    def get_amplitude(self, channel=None):
+        """Get current amplitude in Volts."""
+        return self.query(f"{self._src(channel)}:VOLT?")
 
     # Alias for VOLT
-    def set_voltage(self, voltage: float):
-        self.set_amplitude(voltage)
+    def set_voltage(self, voltage: float, channel=None):
+        self.set_amplitude(voltage, channel)
 
-    def get_voltage(self):
-        return self.get_amplitude()
+    def get_voltage(self, channel=None):
+        return self.get_amplitude(channel)
 
     # -----------------------------
     # DC OFFSET
     # -----------------------------
-    def set_dc_offset(self, offset: float):
-        """Set DC offset in Volts"""
-        self.write(f":VOLT:OFFS {offset}")
+    def set_dc_offset(self, offset: float, channel=None):
+        """Set DC offset in Volts."""
+        self.write(f"{self._src(channel)}:VOLT:OFFS {offset}")
 
-    def get_dc_offset(self):
-        """Get current DC offset in Volts"""
-        return self.query(":VOLT:OFFS?")
+    def get_dc_offset(self, channel=None):
+        """Get current DC offset in Volts."""
+        return self.query(f"{self._src(channel)}:VOLT:OFFS?")
 
     # Alias
-    def set_offset(self, offset: float):
-        self.set_dc_offset(offset)
+    def set_offset(self, offset: float, channel=None):
+        self.set_dc_offset(offset, channel)
 
-    def get_offset(self):
-        return self.get_dc_offset()
+    def get_offset(self, channel=None):
+        return self.get_dc_offset(channel)
 
     # -----------------------------
     # WAVEFORM TYPE
     # -----------------------------
-    def set_waveform(self, waveform: str):
+    def set_waveform(self, waveform: str, channel=None):
         """Set waveform type: SIN, SQU, TRI, RAMP, etc."""
-        self.write(f":FUNC {waveform}")
+        self.write(f"{self._src(channel)}:FUNC {waveform}")
 
-    def get_waveform(self):
-        """Get current waveform type"""
-        return self.query(":FUNC?")
+    def get_waveform(self, channel=None):
+        """Get current waveform type."""
+        return self.query(f"{self._src(channel)}:FUNC?")
 
     # Convenience methods for common waveforms
-    def set_sine(self):
-        self.set_waveform("SIN")
+    def set_sine(self, channel=None):
+        self.set_waveform("SIN", channel)
 
-    def set_square(self):
-        self.set_waveform("SQU")
+    def set_square(self, channel=None):
+        self.set_waveform("SQU", channel)
 
-    def set_triangle(self):
-        self.set_waveform("TRI")
+    def set_triangle(self, channel=None):
+        self.set_waveform("TRI", channel)
 
-    def set_ramp(self):
-        self.set_waveform("RAMP")
+    def set_ramp(self, channel=None):
+        self.set_waveform("RAMP", channel)
 
     # -----------------------------
     # PHASE
     # -----------------------------
-    def set_phase(self, phase: float):
-        """Set phase in degrees"""
-        self.write(f":PHAS {phase}")
+    def set_phase(self, phase: float, channel=None):
+        """Set phase in degrees."""
+        self.write(f"{self._src(channel)}:PHAS {phase}")
 
-    def get_phase(self):
-        """Get current phase in degrees"""
-        return self.query(":PHAS?")
+    def get_phase(self, channel=None):
+        """Get current phase in degrees."""
+        return self.query(f"{self._src(channel)}:PHAS?")
 
     # -----------------------------
     # DUTY CYCLE (for square waves)
     # -----------------------------
-    def set_duty_cycle(self, duty: float):
-        """Set duty cycle as percentage (0-100)"""
-        self.write(f":FUNC:SQU:DCYC {duty}")
+    def set_duty_cycle(self, duty: float, channel=None):
+        """Set duty cycle as percentage (0-100)."""
+        self.write(f"{self._src(channel)}:FUNC:SQU:DCYC {duty}")
 
-    def get_duty_cycle(self):
-        """Get current duty cycle percentage"""
-        return self.query(":FUNC:SQU:DCYC?")
+    def get_duty_cycle(self, channel=None):
+        """Get current duty cycle percentage."""
+        return self.query(f"{self._src(channel)}:FUNC:SQU:DCYC?")
 
     # -----------------------------
     # BURST MODE
     # -----------------------------
-    def set_burst_mode(self, mode: str):
-        """Set burst mode: TRIGgered or MANUAL"""
-        self.write(f":BURS:MODE {mode}")
+    def set_burst_mode(self, mode: str, channel=None):
+        """Set burst mode: TRIGgered or MANUAL."""
+        self.write(f"{self._src(channel)}:BURS:MODE {mode}")
 
-    def get_burst_mode(self):
-        return self.query(":BURS:MODE?")
+    def get_burst_mode(self, channel=None):
+        return self.query(f"{self._src(channel)}:BURS:MODE?")
 
-    def enable_burst(self):
-        self.write(":BURS ON")
+    def enable_burst(self, channel=None):
+        self.write(f"{self._src(channel)}:BURS ON")
 
-    def disable_burst(self):
-        self.write(":BURS OFF")
+    def disable_burst(self, channel=None):
+        self.write(f"{self._src(channel)}:BURS OFF")
 
-    # Set number of cycles in burst
-    def set_burst_cycles(self, cycles: int):
-        self.write(f":BURS:NCYC {cycles}")
+    def set_burst_cycles(self, cycles: int, channel=None):
+        """Set number of cycles in burst."""
+        self.write(f"{self._src(channel)}:BURS:NCYC {cycles}")
 
-    def get_burst_cycles(self):
-        return self.query(":BURS:NCYC?")
+    def get_burst_cycles(self, channel=None):
+        return self.query(f"{self._src(channel)}:BURS:NCYC?")
 
-    # Trigger burst
+    # Trigger burst (global command, no channel prefix needed)
     def trigger_burst(self):
         self.write("*TRG")
 
